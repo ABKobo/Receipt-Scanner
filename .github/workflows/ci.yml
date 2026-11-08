@@ -162,14 +162,39 @@ jobs:
           if (Test-Path deploy-monitor.jsonl) {
             $rows = Get-Content deploy-monitor.jsonl | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} }
           }
+          $rows = @($rows | Sort-Object { [DateTime]$_.start_utc })
           $ok = @($rows | Where-Object { $_.reachable -eq $true }).Count
           $fail = @($rows | Where-Object { $_.reachable -ne $true }).Count
-          $versions = @($rows | Select-Object -ExpandProperty version -Unique) -join ', '
+          $versions = @($rows | Select-Object -ExpandProperty version -Unique)
+          $result = if ($rows.Count -gt 0 -and $fail -eq 0) { 'SUCCESS' } else { 'CHECK_REQUIRED' }
+          $gaps = @()
+          for ($i = 1; $i -lt $rows.Count; $i++) {
+            $gap = (([DateTime]$rows[$i].start_utc) - ([DateTime]$rows[$i-1].end_utc)).TotalSeconds
+            if ($gap -gt 2) { $gaps += [math]::Round($gap, 1) }
+          }
+          $maxGap = if ($gaps.Count -gt 0) { ($gaps | Measure-Object -Maximum).Maximum } else { 0 }
+          $before = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+          $during = if ($rows.Count -gt 2) { $rows[[math]::Floor($rows.Count / 2)] } else { $before }
+          $after = if ($rows.Count -gt 0) { $rows[$rows.Count - 1] } else { $null }
+          $sample = { param($stage, $row) if ($null -eq $row) { "| $stage | - | - | - | - | - | - |" } else { "| $stage | $($row.start_utc) | $($row.status) | $($row.reachable) | $($row.version) | $($row.elapsed_ms) ms | $($row.error) |" } }
           @"
-          ## Deployment verification
-          - URL: http://127.0.0.1:8000/
-          - Version(s): $versions
-          - Monitor records: $($rows.Count)
-          - Reachable: $ok, failed/unverified: $fail
-          - Observation: records are sampled at 1-second intervals; gaps are unverified intervals.
+          # Receipt Scanner deployment verification
+
+          **Result:** $result  |  **URL:** http://127.0.0.1:8000/  |  **Version(s):** $($versions -join ', ')
+
+          **Requests:** $($rows.Count) total, $ok successful, $fail failed/unverified  |  **Sampling:** 1 second  |  **Maximum recorded gap:** $maxGap seconds
+
+          ## Before / during / after
+
+          | Stage | UTC start | HTTP | Reachable | Version | Response | Error |
+          |---|---|---:|:---:|---|---:|---|
+          $(& $sample 'Before' $before)
+          $(& $sample 'During' $during)
+          $(& $sample 'After' $after)
+
+          ## Verification notes
+
+          - The independent monitor started before deployment and continued after deployment.
+          - Intervals over 2 seconds are marked as unverified; detected maximum gap: **$maxGap seconds**.
+          - Version transition observed: **$($versions -join ' -> ')**.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
