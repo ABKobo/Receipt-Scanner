@@ -8,3 +8,6 @@ venv/
 *.log
 .DS_Store
 models/
+
+# GitHub Actions self-hosted runner (registration tokens and credentials)
+actions-runner/
