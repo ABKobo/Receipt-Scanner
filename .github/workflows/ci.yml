@@ -76,7 +76,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Pull latest image, replace, and health-check container
-        shell: powershell
+        # Bypass is scoped to this GitHub Actions process only; the machine's
+        # execution policy is not changed.
+        shell: powershell -ExecutionPolicy Bypass -File {0}
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           CONTAINER_NAME: receipt-scanner
