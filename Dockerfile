@@ -15,7 +15,10 @@ RUN apt-get update \
 
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements.txt
+    && grep -Ev '^(torch|torchvision)==' requirements.txt > /tmp/requirements-no-torch.txt \
+    && python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.5.1+cpu torchvision==0.20.1+cpu \
+    && python -m pip install -r /tmp/requirements-no-torch.txt
 
 COPY app ./app
 
