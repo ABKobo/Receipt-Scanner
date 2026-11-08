@@ -1,5 +1,5 @@
 from __future__ import annotations
-import csv, io, re
+import csv, io, re, threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 BASE_DIR=Path(__file__).resolve().parent
 app=FastAPI(title='Receipt Scanner')
 app.mount('/static',StaticFiles(directory=BASE_DIR/'static'),name='static')
+_reader = None
+_reader_lock = threading.Lock()
 DATE_RE=re.compile(r'(20\d{2})[./-](\d{1,2})[./-](\d{1,2})')
 TIME_RE=re.compile(r'\b\d{1,2}:\d{2}\b')
 MONEY_RE=re.compile(r'([0-9][0-9,]*)\s*(?:\uc6d0|KRW)?$')
@@ -178,7 +180,21 @@ def _restore_single_quantity(text:str, items:list[dict[str,str]])->list[dict[str
         updated=[dict(items[0])]; updated[0]['quantity']='1'; return updated
     return items
 
-def run_ocr(data:bytes)->dict[str,Any]:
+def get_ocr_reader():
+    """Load EasyOCR once per worker instead of once per upload."""
+    global _reader
+    if _reader is None:
+        with _reader_lock:
+            if _reader is None:
+                import easyocr
+                _reader = easyocr.Reader(
+                    ['ko', 'en'], gpu=False, verbose=False,
+                    model_storage_directory=str(BASE_DIR/'models'),
+                    user_network_directory=str(BASE_DIR/'models'/'user_network'),
+                )
+    return _reader
+
+def run_ocr(data:bytes, include_raw:bool=False)->dict[str,Any]:
     try:
         import cv2,easyocr,numpy as np
         from PIL import Image
@@ -186,7 +202,7 @@ def run_ocr(data:bytes)->dict[str,Any]:
     try:
         image=Image.open(io.BytesIO(data)).convert('RGB')
         if image.width<2 or image.height<2:raise ValueError('Image is too small.')
-        reader=easyocr.Reader(['ko','en'],gpu=False,verbose=False,model_storage_directory=str(BASE_DIR/'models'),user_network_directory=str(BASE_DIR/'models'/'user_network'))
+        reader=get_ocr_reader()
         # Small receipt photos need substantially more pixels before the
         # recognizer can distinguish Korean glyphs and comma-separated prices.
         # Keep the cap bounded for deployment memory usage.
@@ -209,25 +225,24 @@ def run_ocr(data:bytes)->dict[str,Any]:
         def rotated(value, index):
             return (value,cv2.rotate(value,cv2.ROTATE_90_CLOCKWISE),
                     cv2.rotate(value,cv2.ROTATE_180),cv2.rotate(value,cv2.ROTATE_90_COUNTERCLOCKWISE))[index]
-        orientation_results=[]
-        for index in range(4):
-            detected=reader.readtext(rotated(base,index),detail=1,paragraph=False,mag_ratio=1.2)
-            orientation_results.append((_ocr_quality('\n'.join(str(r[1]) for r in detected if len(r)>1)),index))
-        orientation=max(orientation_results,key=lambda value:value[0])[1]
+        # Keep one request bounded on CPU-only deployments.  The previous
+        # implementation performed four orientation scans plus several
+        # variants, which made a single upload take minutes.  Receipts are
+        # normally upright; use the original and adaptive variants and pick
+        # the structurally stronger result.
         candidates=[]
-        for variant_index,variant in enumerate(variants):
-            settings=[{}]
-            if variant_index>=3:
-                settings.append({'text_threshold':.2,'low_text':.1,'link_threshold':.1})
-            for kwargs in settings:
-                detected=reader.readtext(rotated(variant,orientation),detail=1,paragraph=False,mag_ratio=1.2,**kwargs)
-                candidates.append((_candidate_score(detected),detected))
+        for variant in (base, cv2.cvtColor(adaptive,cv2.COLOR_GRAY2RGB)):
+            detected=reader.readtext(variant,detail=1,paragraph=False,mag_ratio=1.2)
+            candidates.append((_candidate_score(detected),detected))
         _,results=max(candidates,key=lambda v:v[0]); all_lines=[str(r[1]).strip() for r in results if len(r)>1 and str(r[1]).strip()]; section=extract_item_section(results); lines=section or [str(r[1]).strip() for r in results if len(r)>2 and float(r[2])>=.25 and str(r[1]).strip()]
         text='\n'.join(all_lines); dates=extract_date_candidates(text); times=extract_time_candidates(text); items=parse_items_from_layout(results) or parse_items(lines); mode='item-section'
         if not items:items=parse_items(all_lines); mode='full-text-fallback'
         items=_restore_discounted_item_price(text,items)
         items=_restore_single_quantity(text,items)
-        return {'dates':dates,'purchase_date':dates[0] if len(dates)==1 else '','times':times,'purchase_time':times[0] if len(times)==1 else '','items':items,'parse_mode':mode,'notice':'OCR 원문은 표 생성 후 폐기됩니다.'}
+        result={'dates':dates,'purchase_date':dates[0] if len(dates)==1 else '','times':times,'purchase_time':times[0] if len(times)==1 else '','items':items,'parse_mode':mode,'notice':'OCR 원문은 표 생성 후 폐기됩니다.'}
+        if include_raw:
+            result['raw_text']=text
+        return result
     except Exception as exc:raise RuntimeError(f'OCR processing failed: {exc}') from exc
 
 @app.get('/',response_class=HTMLResponse)

@@ -11,3 +11,11 @@ models/
 
 # GitHub Actions self-hosted runner (registration tokens and credentials)
 actions-runner/
+
+# MLOps evaluation data, downloaded archives, models, caches, and logs
+mlops-data/
+sroie-all/
+sroie-work/
+sroie-download.zip
+sroie2.zip
+mlops-logs/
